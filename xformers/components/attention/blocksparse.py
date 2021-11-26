@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-from torch import nn
 
 from xformers import _is_triton_available
 from xformers.components.attention import Attention, AttentionConfig, register_attention
@@ -80,7 +79,7 @@ if _is_triton_available:
             assert block_size >= 16, "Minimum block size is 16, for now at least"
 
             super().__init__()
-            self.attn_drop = nn.Dropout(dropout, inplace=False)
+            self.p_dropout = dropout
 
             # Pure blocksparse data
             self.layout = layout
@@ -182,6 +181,17 @@ if _is_triton_available:
             # - (sparse) attention matrix = (dense) Kt * (dense) Q
             q = q / math.sqrt(q.size(-1))
             sparse_att_mat = self.sparse_dot_sdd(q, k)
+
+            # - optional dropout through the attention mask
+            # FIXME: This will apply the same mask across heads and batch, not correct
+            if self.p_dropout > 0:
+                if att_mask is None:
+                    att_mask = torch.ones(
+                        (q.shape[-2], k.shape[-2]), device=q.device, dtype=q.dtype
+                    )
+
+                dropout_mask = torch.rand_like(att_mask) < self.p_dropout
+                att_mask.masked_fill_(dropout_mask, float("-inf"))
 
             # - softmax on the sparse attention matrix
             sparse_att_mat = self.sparse_softmax(
